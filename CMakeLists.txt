@@ -278,6 +278,7 @@ SET(VERSE_SUPPORT_CPP17 OFF CACHE BOOL "Enable build of libraries using C++ 17 s
 SET(VERSE_STATIC_BUILD OFF CACHE BOOL "Enable static build of osgVerse libraries")
 SET(VERSE_USE_OSG_STATIC OFF CACHE BOOL "Use static build of OpenSceneGraph (will force osgVerse to be static)")
 SET(VERSE_USE_MTT_DRIVER OFF CACHE BOOL "Use MooreThreads MTT drivers")
+SET(VERSE_USE_VCPKG OFF CACHE BOOL "Use vcpkg libraries instead of bundled 3rdparty (Eigen3, blend2d, sqlite3, libdeflate)")
 
 IF(USE_WASM_OPTIONS OR VERSE_SUPPORT_CPP17)
     SET(CMAKE_CXX_STANDARD 17)
@@ -487,6 +488,56 @@ ENDIF(OSG_BUILD_INCLUDE_DIR)
 
 ######################################### Optional Dependencies
 MESSAGE(STATUS "[osgVerse] Automatically Search for Dependencies in ${THIRDPARTY_ROOT}...")
+
+######################################### vcpkg Dependencies
+IF(VERSE_USE_VCPKG)
+    MESSAGE(STATUS "[osgVerse] Using vcpkg libraries for core dependencies...")
+
+    # Eigen3 (header-only)
+    FIND_PACKAGE(Eigen3 CONFIG QUIET)
+    IF(Eigen3_FOUND)
+        MESSAGE(STATUS "[osgVerse] Found vcpkg Eigen3: ${EIGEN3_INCLUDE_DIR}")
+        SET(VCPKG_EIGEN3_FOUND TRUE)
+    ELSE()
+        MESSAGE(WARNING "[osgVerse] vcpkg Eigen3 not found, will use bundled version")
+        SET(VCPKG_EIGEN3_FOUND FALSE)
+    ENDIF()
+
+    # blend2d
+    FIND_PACKAGE(blend2d CONFIG QUIET)
+    IF(blend2d_FOUND)
+        MESSAGE(STATUS "[osgVerse] Found vcpkg blend2d")
+        SET(VCPKG_BLEND2D_FOUND TRUE)
+    ELSE()
+        MESSAGE(WARNING "[osgVerse] vcpkg blend2d not found, will use bundled version")
+        SET(VCPKG_BLEND2D_FOUND FALSE)
+    ENDIF()
+
+    # sqlite3
+    FIND_PACKAGE(unofficial-sqlite3 CONFIG QUIET)
+    IF(unofficial-sqlite3_FOUND)
+        MESSAGE(STATUS "[osgVerse] Found vcpkg sqlite3")
+        SET(VCPKG_SQLITE3_FOUND TRUE)
+    ELSE()
+        MESSAGE(WARNING "[osgVerse] vcpkg sqlite3 not found, will use bundled version")
+        SET(VCPKG_SQLITE3_FOUND FALSE)
+    ENDIF()
+
+    # libdeflate
+    FIND_PACKAGE(libdeflate CONFIG QUIET)
+    IF(libdeflate_FOUND)
+        MESSAGE(STATUS "[osgVerse] Found vcpkg libdeflate")
+        SET(VCPKG_LIBDEFLATE_FOUND TRUE)
+    ELSE()
+        MESSAGE(WARNING "[osgVerse] vcpkg libdeflate not found, will use bundled version")
+        SET(VCPKG_LIBDEFLATE_FOUND FALSE)
+    ENDIF()
+ELSE()
+    SET(VCPKG_EIGEN3_FOUND FALSE)
+    SET(VCPKG_BLEND2D_FOUND FALSE)
+    SET(VCPKG_SQLITE3_FOUND FALSE)
+    SET(VCPKG_LIBDEFLATE_FOUND FALSE)
+ENDIF(VERSE_USE_VCPKG)
 
 FIND_DEPENDENCE(PYTHON "Python.h" "libpython.so;libpython3.so;python.lib;python3.lib" "")
 FIND_DEPENDENCE(BULLET "btBulletDynamicsCommon.h" "libBulletDynamics.so;libBulletDynamics.a;BulletDynamics.lib" "bullet")

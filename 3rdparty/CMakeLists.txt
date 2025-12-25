@@ -509,22 +509,49 @@ SOURCE_GROUP("Tweeny Files" FILES ${TWEENY_SOURCE_FILES})
 #######################
 
 SET(LIB_NAME osgVerseDependency)
+
+### Handle vcpkg replacements
+SET(VCPKG_REPLACED_LIBS "")
+
+# sqlite3 and libdeflate: conditionally include source files
+IF(VCPKG_SQLITE3_FOUND)
+    SET(SQLITE3_SOURCE_FILES "")
+    LIST(APPEND VCPKG_REPLACED_LIBS unofficial::sqlite3::sqlite3)
+ELSE()
+    SET(SQLITE3_SOURCE_FILES sqlite3.c sqlite3.h)
+ENDIF()
+
+IF(VCPKG_LIBDEFLATE_FOUND)
+    SET(LIBDEFLATE_SOURCE_FILES "")
+    LIST(APPEND VCPKG_REPLACED_LIBS libdeflate::libdeflate_shared)
+ELSE()
+    SET(LIBDEFLATE_SOURCE_FILES libdeflate.c libdeflate.h)
+ENDIF()
+
+# blend2d: conditionally include source files
+IF(VCPKG_BLEND2D_FOUND)
+    SET(BLEND2D_VCPKG_SOURCE_FILES "")
+    LIST(APPEND VCPKG_REPLACED_LIBS blend2d::blend2d)
+ELSE()
+    SET(BLEND2D_VCPKG_SOURCE_FILES ${BLEND2D_SOURCE_FILES})
+ENDIF()
+
 SET(LIBRARY_FILES
 	tiny_obj_loader.h tiny_gltf.h picojson.h nanoflann.hpp exprtk.hpp mio.hpp any.hpp VHACD.h
     backward.hpp strtk.hpp ghc/filesystem.hpp rapidxml/rapidxml.hpp rapidjson/rapidjson.h parallel_radix_sort.h
     nanoid/nanoid.cpp nanoid/nanoid.h nanoid/crypto_random.cpp nanoid/crypto_random.h miniaudio.h
-    sqlite3.c sqlite3.h ofbx.cpp ofbx.h libdeflate.c libdeflate.h tinyexr.h dkm_parallel.hpp lsqcpp.hpp
+    ${SQLITE3_SOURCE_FILES} ofbx.cpp ofbx.h ${LIBDEFLATE_SOURCE_FILES} tinyexr.h dkm_parallel.hpp lsqcpp.hpp
     mikktspace.c mikktspace.h laplacian_deformation.cpp laplacian_deformation.hpp lightmapper.h
 	xatlas.cpp xatlas.h mapbox/variant.hpp mapbox/geometry.hpp mapbox/polylabel.hpp mapbox/geojson.cpp
     GL/glew.c GL/glew.h xxYUV/rgb2yuv.cpp xxYUV/yuv2rgb.cpp xxYUV/cpu.cpp timeout.c timeout.h
     BSplineFitting/cubic_b_spline.cpp BSplineFitting/open_cubic_b_spline.cpp BSplineFitting/spline_curve_fitting.cpp
     clipper2/clipper.engine.cpp clipper2/clipper.offset.cpp clipper2/clipper.rectclip.cpp pybind11/pybind11.h
-    bc7_rdo/rgbcx.h bc7_rdo/rgbcx.cpp ${APPROXMVBB_SOURCE_FILES} ${BLEND2D_SOURCE_FILES} ${DISCREGRID_SOURCE_FILES}
+    bc7_rdo/rgbcx.h bc7_rdo/rgbcx.cpp ${APPROXMVBB_SOURCE_FILES} ${BLEND2D_VCPKG_SOURCE_FILES} ${DISCREGRID_SOURCE_FILES}
     ${FILTER_SOURCE_FILES} ${IMGUI_SOURCE_FILES} ${KTX_SOURCE_FILES} ${LASZIP_SOURCE_FILES}
     ${LEVELDB_SOURCE_FILES} ${LIBHV_SOURCE_FILES} ${MARL_SOURCE_FILES} ${MBEDTLS_SOURCE_FILES}
     ${MESHOPTIMIZER_SOURCE_FILES} ${METIS_SOURCE_FILES} ${NORMALMAP_SOURCE_FILES} ${OZZ_SOURCE_FILES}
     ${PINYIN_SOURCE_FILES} ${PMP_MCUT_SOURCE_FILES} ${RECAST_SOURCE_FILES} ${RLOTTIE_SOURCE_FILES}
-    ${SHAPELIB_SOURCE_FILES} ${SPZ_SOURCE_FILES} ${TINYSPLINE_SOURCE_FILES} ${TWEENY_SOURCE_FILES} 
+    ${SHAPELIB_SOURCE_FILES} ${SPZ_SOURCE_FILES} ${TINYSPLINE_SOURCE_FILES} ${TWEENY_SOURCE_FILES}
 )
 
 IF(LIBIGL_FOUND)
@@ -568,7 +595,6 @@ ADD_DEFINITIONS(-DApproxMVBB_BUILD_LIBRARY                                # Appr
                 -DGLEW_STATIC -DGLEW_NO_GLU                               # GLEW
                 -DIMGUI_IMPL_OPENGL_LOADER_GLEW                           # imgui
                 -DLASZIPDLL_EXPORTS                                       # laszip
-                -DBL_STATIC -DBL_BUILD_NO_JIT                             # Blend2D
                 -DLEVELDB_COMPILE_LIBRARY -DLEVELDB_HAS_PORT_CONFIG_H=1   # LevelDB
                 -DHV_STATICLIB -DWITH_MBEDTLS                             # libhv / mbedtls
                 -DRLOTTIE_BUILD=0                                         # Rlottie
@@ -577,6 +603,9 @@ ADD_DEFINITIONS(-DApproxMVBB_BUILD_LIBRARY                                # Appr
                 -DUSINGZ                                                  # clipper2
                 -DIDXTYPEWIDTH=32 -DREALTYPEWIDTH=32                      # METIS
                 -DHAVE_UNORDERED_MAP=1 -D_USE_MATH_DEFINES)
+IF(NOT VCPKG_BLEND2D_FOUND)
+    ADD_DEFINITIONS(-DBL_STATIC -DBL_BUILD_NO_JIT)                        # Blend2D (bundled version)
+ENDIF()
 IF(MSVC_VERSION LESS 1910)
     ADD_DEFINITIONS(-DWITHOUT_HTTP_CONTENT)  # libhv: disable use of json.hpp in VS2015
 ENDIF()
@@ -603,23 +632,46 @@ ENDIF()
 
 IF(NOT USE_WASM_OPTIONS)
     # libktx and Blend2D NOT compile with Emscripten at present?
+    # BL_BUILD_OPT_* definitions are only needed for bundled Blend2D
     IF("avx2" IN_LIST VERSE_SIMD_FEATURES)
-        ADD_DEFINITIONS(-DBL_BUILD_OPT_AVX2 -DBASISU_SUPPORT_SSE=1)
+        IF(NOT VCPKG_BLEND2D_FOUND)
+            ADD_DEFINITIONS(-DBL_BUILD_OPT_AVX2)
+        ENDIF()
+        ADD_DEFINITIONS(-DBASISU_SUPPORT_SSE=1)
         SET(LIBRARY_FILES ${LIBRARY_FILES} ${RASTERIZER_SOURCE_FILES})
     ELSEIF("avx" IN_LIST VERSE_SIMD_FEATURES)
-        ADD_DEFINITIONS(-DBL_BUILD_OPT_AVX -DBASISU_SUPPORT_SSE=1)
+        IF(NOT VCPKG_BLEND2D_FOUND)
+            ADD_DEFINITIONS(-DBL_BUILD_OPT_AVX)
+        ENDIF()
+        ADD_DEFINITIONS(-DBASISU_SUPPORT_SSE=1)
     ELSEIF("sse4.2" IN_LIST VERSE_SIMD_FEATURES)
-        ADD_DEFINITIONS(-DBL_BUILD_OPT_SSE4_2 -DBASISU_SUPPORT_SSE=1)
+        IF(NOT VCPKG_BLEND2D_FOUND)
+            ADD_DEFINITIONS(-DBL_BUILD_OPT_SSE4_2)
+        ENDIF()
+        ADD_DEFINITIONS(-DBASISU_SUPPORT_SSE=1)
     ELSEIF("sse4.1" IN_LIST VERSE_SIMD_FEATURES)
-        ADD_DEFINITIONS(-DBL_BUILD_OPT_SSE4_1 -DBASISU_SUPPORT_SSE=1)
+        IF(NOT VCPKG_BLEND2D_FOUND)
+            ADD_DEFINITIONS(-DBL_BUILD_OPT_SSE4_1)
+        ENDIF()
+        ADD_DEFINITIONS(-DBASISU_SUPPORT_SSE=1)
     ELSEIF("ssse3" IN_LIST VERSE_SIMD_FEATURES)
-        ADD_DEFINITIONS(-DBL_BUILD_OPT_SSSE3 -DBASISU_SUPPORT_SSE=1)
+        IF(NOT VCPKG_BLEND2D_FOUND)
+            ADD_DEFINITIONS(-DBL_BUILD_OPT_SSSE3)
+        ENDIF()
+        ADD_DEFINITIONS(-DBASISU_SUPPORT_SSE=1)
     ELSEIF("sse3" IN_LIST VERSE_SIMD_FEATURES)
-        ADD_DEFINITIONS(-DBL_BUILD_OPT_SSE3 -DBASISU_SUPPORT_SSE=1)
+        IF(NOT VCPKG_BLEND2D_FOUND)
+            ADD_DEFINITIONS(-DBL_BUILD_OPT_SSE3)
+        ENDIF()
+        ADD_DEFINITIONS(-DBASISU_SUPPORT_SSE=1)
     ELSEIF("sse2" IN_LIST VERSE_SIMD_FEATURES)
-        ADD_DEFINITIONS(-DBL_BUILD_OPT_SSE2)
+        IF(NOT VCPKG_BLEND2D_FOUND)
+            ADD_DEFINITIONS(-DBL_BUILD_OPT_SSE2)
+        ENDIF()
     ELSE()
-        ADD_DEFINITIONS(-DBL_BUILD_NO_SIMD)
+        IF(NOT VCPKG_BLEND2D_FOUND)
+            ADD_DEFINITIONS(-DBL_BUILD_NO_SIMD)
+        ENDIF()
     ENDIF()
 ENDIF(NOT USE_WASM_OPTIONS)
 
@@ -639,11 +691,28 @@ ELSEIF(VERSE_USE_EXTERNAL_GLES3)
     ENDIF(APPLE)
 ENDIF()
 
-INCLUDE_DIRECTORIES(libhv libhv/all libhv/mbedtls imgui stb ozz leveldb ktx ktx/basisu/zstd ktx/dfdutils
-                    metis/gklib quadriflow recastnavigation/Detour rlottie rlottie/vector nanobind
-                    Discregrid "${CMAKE_BINARY_DIR}/3rdparty/leveldb" ${THIRDPARTY_INCLUDE_DIRS})
+### Include directories setup
+SET(LOCAL_INCLUDE_DIRS libhv libhv/all libhv/mbedtls imgui stb ozz leveldb ktx ktx/basisu/zstd ktx/dfdutils
+                       metis/gklib quadriflow recastnavigation/Detour rlottie rlottie/vector nanobind
+                       Discregrid "${CMAKE_BINARY_DIR}/3rdparty/leveldb" ${THIRDPARTY_INCLUDE_DIRS})
+
+# Add vcpkg Eigen3 include path if using vcpkg, otherwise use bundled Eigen
+IF(VCPKG_EIGEN3_FOUND)
+    # Eigen3 from vcpkg - include path is already set by find_package
+    # No need to include bundled Eigen directory
+ELSE()
+    SET(LOCAL_INCLUDE_DIRS ${LOCAL_INCLUDE_DIRS} "${CMAKE_SOURCE_DIR}/3rdparty")
+ENDIF()
+
+INCLUDE_DIRECTORIES(${LOCAL_INCLUDE_DIRS})
 NEW_LIBRARY(${LIB_NAME} STATIC)
-TARGET_LINK_LIBRARIES(${LIB_NAME} ${THIRDPARTY_LIBRARIES})
+TARGET_LINK_LIBRARIES(${LIB_NAME} ${THIRDPARTY_LIBRARIES} ${VCPKG_REPLACED_LIBS})
+
+# Link vcpkg Eigen3 if available (header-only, just need include path)
+IF(VCPKG_EIGEN3_FOUND)
+    TARGET_LINK_LIBRARIES(${LIB_NAME} Eigen3::Eigen)
+ENDIF()
+
 TARGET_COMPILE_OPTIONS(${LIB_NAME} PUBLIC -D_SCL_SECURE_NO_WARNINGS)
 
 SET(THIRDPARTY_INCLUDE_FILES any.hpp picojson.h strtk.hpp backward.hpp)
