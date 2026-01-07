@@ -9,6 +9,8 @@
 #include <osgDB/ReadFile>
 #include <osgDB/WriteFile>
 
+#include "modeling/Utilities.h"
+#include "modeling/GaussianGeometry.h"
 #include "animation/TweenAnimation.h"
 #include "animation/BlendShapeAnimation.h"
 #include "pipeline/Utilities.h"
@@ -41,7 +43,9 @@ namespace osgVerse
         "KHR_texture_basisu",
         "MSFT_texture_dds",
         "KHR_materials_specular",
-        "KHR_materials_unlit"
+        "KHR_materials_unlit",
+        "KHR_gaussian_splatting",
+        "KHR_gaussian_splatting_compression_spz_2"
     };
 
     extern bool LoadBinaryV1(std::vector<char>& data, const std::string& baseDir);
@@ -561,84 +565,179 @@ namespace osgVerse
 
         for (size_t i = 0; i < mesh.primitives.size(); ++i)
         {
-            std::vector<unsigned char> jointList0; std::vector<unsigned short> jointList1;
-            std::vector<float> weightList;
+            struct GaussianPreparedData
+            {
+                osg::ref_ptr<osg::Vec4Array> quat, red[4], green[4], blue[4];
+                osg::ref_ptr<osg::Vec3Array> scale;
+                osg::ref_ptr<osg::FloatArray> alpha;
+                int shDegrees; bool enabled;
+                GaussianPreparedData() : shDegrees(0), enabled(false) {}
+            } gsData;
 
-            osg::ref_ptr<osg::Geometry> geom = new osg::Geometry;
-            geom->setName(mesh.name + "_" + std::to_string(i));
-            geom->setUseDisplayList(false); geom->setUseVertexBufferObjects(true);
+            struct SkeletonPreparedData
+            {
+                std::vector<unsigned char> jointList0;
+                std::vector<unsigned short> jointList1;
+                std::vector<float> weightList;
+            } skData;
 
+            std::vector<unsigned char> bufferData; std::map<std::string, int> extBufferViews;
             tinygltf::Primitive primitive = mesh.primitives[i];
+            for (std::map<std::string, tinygltf::Value>::iterator it = primitive.extensions.begin();
+                 it != primitive.extensions.end(); ++it)
+            {
+                const std::string& ext = it->first;
+                std::vector<std::string> keys = it->second.Keys();
+                if (ext == "KHR_gaussian_splatting") gsData.enabled = true;
+
+                for (size_t i = 0; i < keys.size(); ++i)
+                {
+                    if (keys[i] == "extensions")
+                    {
+                        const tinygltf::Value& val = it->second.Get("extensions");
+                        std::string subExt = "KHR_gaussian_splatting_compression_spz_2";
+                        if (val.Has(subExt))
+                        {
+                            const tinygltf::Value& spz = val.Get(subExt);
+                            if (spz.Has("bufferView")) extBufferViews[subExt] = spz.Get("bufferView").GetNumberAsInt();
+                        }
+                    }
+                    else {}
+                }
+            }
+
+            osg::ref_ptr<osg::Geometry> geom = gsData.enabled ? new GaussianGeometry : new osg::Geometry;
+            if (gsData.enabled) static_cast<GaussianGeometry*>(geom.get())->setShDegrees(gsData.shDegrees);
+            geom->setUseDisplayList(false); geom->setUseVertexBufferObjects(true);
+            geom->setName(mesh.name + "_" + std::to_string(i));
+            if (primitive.material >= 0)
+            {
+                tinygltf::Material& material = _modelDef.materials[primitive.material];
+                createMaterial(geom->getOrCreateStateSet(), material);  // add material
+            }
+
+            if (gsData.enabled && extBufferViews.find("KHR_gaussian_splatting_compression_spz_2") != extBufferViews.end())
+            {
+                osg::ref_ptr<osg::Geometry> geom2 =
+                    createFromExtGaussianSplattingSPZ2(mesh.name, extBufferViews["KHR_gaussian_splatting_compression_spz_2"]);
+                if (geom2.valid()) { geom2->setName(geom->getName()); geom = geom2; }
+                geode->addDrawable(geom.get()); continue;
+            }
+
             for (std::map<std::string, int>::iterator attrib = primitive.attributes.begin();
                  attrib != primitive.attributes.end(); ++attrib)
             {
                 tinygltf::Accessor& attrAccessor = _modelDef.accessors[attrib->second];
-                const tinygltf::BufferView& attrView = _modelDef.bufferViews[attrAccessor.bufferView];
-                int size = attrAccessor.count; if (!size || attrView.buffer < 0) continue;
-
-                const tinygltf::Buffer& buffer = _modelDef.buffers[attrView.buffer];
+                int size = attrAccessor.count; if (!size) continue;
                 int compNum = (attrAccessor.type != TINYGLTF_TYPE_SCALAR) ? attrAccessor.type : 1;
                 int compSize = tinygltf::GetComponentSizeInBytes(attrAccessor.componentType);
                 int copySize = size * (compSize * compNum);
-                size_t offset = attrView.byteOffset + attrAccessor.byteOffset;
-                size_t stride = (attrView.byteStride > 0 && attrView.byteStride != (compSize * compNum))
-                              ? attrView.byteStride : 0;
 
+                size_t offset = 0, stride = 0;
+                if (attrAccessor.bufferView >= 0)
+                {
+                    const tinygltf::BufferView& attrView = _modelDef.bufferViews[attrAccessor.bufferView];
+                    if (attrView.buffer >= 0)
+                    {
+                        const tinygltf::Buffer& buffer = _modelDef.buffers[attrView.buffer];
+                        bufferData = buffer.data;
+                    }
+                    offset = attrView.byteOffset + attrAccessor.byteOffset;
+                    stride = (attrView.byteStride > 0 && attrView.byteStride != (compSize * compNum))
+                           ? attrView.byteStride : 0;
+                }
+                else
+                    {}  // TODO: process certain extension buffer?
+
+                if (bufferData.empty())
+                    { OSG_WARN << "[LoaderGLTF] No data buffer for " << attrib->first << std::endl; continue; }
                 //std::cout << attrib->first << ": Size = " << size << ", Components = " << compNum
                 //          << ", ComponentBytes = " << compSize << std::endl;
+
                 if (attrib->first.compare("POSITION") == 0 && compSize == 4 && compNum == 3)
                 {
-                    osg::Vec3Array* va = new osg::Vec3Array(size);
-                    copyBufferData(&(*va)[0], &buffer.data[offset], copySize, stride, size);
+                    osg::ref_ptr<osg::Vec3Array> va = new osg::Vec3Array(size);
+                    copyBufferData(&(*va)[0], &bufferData[offset], copySize, stride, size);
 #if OSG_VERSION_GREATER_THAN(3, 1, 8)
                     va->setNormalize(attrAccessor.normalized);
 #endif
-                    geom->setVertexArray(va);
+                    if (!gsData.enabled) geom->setVertexArray(va.get());
+                    else static_cast<GaussianGeometry*>(geom.get())->setPosition(va.get());
                 }
                 else if (attrib->first.compare("NORMAL") == 0 && compSize == 4 && compNum == 3)
                 {
-                    osg::Vec3Array* na = new osg::Vec3Array(size);
-                    copyBufferData(&(*na)[0], &buffer.data[offset], copySize, stride, size);
+                    osg::ref_ptr<osg::Vec3Array> na = new osg::Vec3Array(size);
+                    copyBufferData(&(*na)[0], &bufferData[offset], copySize, stride, size);
 #if OSG_VERSION_GREATER_THAN(3, 1, 8)
                     na->setNormalize(attrAccessor.normalized);
-                    geom->setNormalArray(na, osg::Array::BIND_PER_VERTEX);
-#else
-                    geom->setNormalArray(na); geom->setNormalBinding(osg::Geometry::BIND_PER_VERTEX);
 #endif
+                    if (!gsData.enabled) geom->setNormalArray(na.get());
+                    geom->setNormalBinding(osg::Geometry::BIND_PER_VERTEX);
                 }
                 else if (attrib->first.compare("TANGENT") == 0 && compSize == 4 && compNum == 4)
                 {
-                    osg::Vec4Array* ta = new osg::Vec4Array(size);
-                    copyBufferData(&(*ta)[0], &buffer.data[offset], copySize, stride, size);
+                    osg::ref_ptr<osg::Vec4Array> ta = new osg::Vec4Array(size);
+                    copyBufferData(&(*ta)[0], &bufferData[offset], copySize, stride, size);
 #if OSG_VERSION_GREATER_THAN(3, 1, 8)
                     ta->setNormalize(attrAccessor.normalized);
-                    geom->setVertexAttribArray(6, ta, osg::Array::BIND_PER_VERTEX);
 #endif
-                    geom->setVertexAttribArray(6, ta);
+                    if (!gsData.enabled) geom->setVertexAttribArray(6, ta.get());
                     geom->setVertexAttribBinding(6, osg::Geometry::BIND_PER_VERTEX);
                 }
                 else if (attrib->first.find("COLOR") == 0 && compNum == 4)
                 {
-                    osg::Array* ca = NULL;
+                    osg::ref_ptr<osg::Array> ca;
                     if (compSize == 1)
                     {
                         osg::Vec4ubArray* ca4ub = new osg::Vec4ubArray(size); ca = ca4ub;
-                        copyBufferData(&(*ca4ub)[0], &buffer.data[offset], copySize, stride, size);
+                        copyBufferData(&(*ca4ub)[0], &bufferData[offset], copySize, stride, size);
                     }
                     else if (compSize == 4)
                     {
                         osg::Vec4Array* ca4f = new osg::Vec4Array(size); ca = ca4f;
-                        copyBufferData(&(*ca4f)[0], &buffer.data[offset], copySize, stride, size);
+                        copyBufferData(&(*ca4f)[0], &bufferData[offset], copySize, stride, size);
                     }
 
-                    if (ca)
+                    if (ca.valid())
                     {
+                        if (gsData.enabled)
+                        {
+                            gsData.alpha = new osg::FloatArray(size);
+                            if (!gsData.red[0]) gsData.red[0] = new osg::Vec4Array(size);
+                            if (!gsData.green[0]) gsData.green[0] = new osg::Vec4Array(size);
+                            if (!gsData.blue[0]) gsData.blue[0] = new osg::Vec4Array(size);
+
+                            if (compSize == 1)
+                            {
+                                osg::Vec4ubArray* ca4ub = static_cast<osg::Vec4ubArray*>(ca.get());
+                                for (size_t c = 0; c < size; ++c)
+                                {
+                                    const osg::Vec4ub& v = (*ca4ub)[c]; (*gsData.alpha)[c] = v.a() / 255.0f;
+                                    (*(gsData.red[0]))[c] = osg::Vec4(v[0] / 255.0f, 0.0f, 0.0f, 0.0f);
+                                    (*(gsData.green[0]))[c] = osg::Vec4(v[1] / 255.0f, 0.0f, 0.0f, 0.0f);
+                                    (*(gsData.blue[0]))[c] = osg::Vec4(v[2] / 255.0f, 0.0f, 0.0f, 0.0f);
+                                }
+                            }
+                            else if (compSize == 4)
+                            {
+                                osg::Vec4Array* ca4f = static_cast<osg::Vec4Array*>(ca.get());
+                                for (size_t c = 0; c < size; ++c)
+                                {
+                                    const osg::Vec4& v = (*ca4f)[c]; (*gsData.alpha)[c] = v.a();
+                                    (*(gsData.red[0]))[c] = osg::Vec4(v[0], 0.0f, 0.0f, 0.0f);
+                                    (*(gsData.green[0]))[c] = osg::Vec4(v[1], 0.0f, 0.0f, 0.0f);
+                                    (*(gsData.blue[0]))[c] = osg::Vec4(v[2], 0.0f, 0.0f, 0.0f);
+                                }
+                            }
+                        }
+                        else
+                        {
 #if OSG_VERSION_GREATER_THAN(3, 1, 8)
-                        ca->setNormalize(attrAccessor.normalized);
-                        geom->setColorArray(ca, osg::Array::BIND_PER_VERTEX);
-#else
-                        geom->setColorArray(ca); geom->setColorBinding(osg::Geometry::BIND_PER_VERTEX);
+                            ca->setNormalize(attrAccessor.normalized);
 #endif
+                            if (!gsData.enabled) geom->setColorArray(ca.get());
+                            geom->setColorBinding(osg::Geometry::BIND_PER_VERTEX);
+                        }
                     }
                 }
                 else if (attrib->first.find("TEXCOORD_") != std::string::npos && compSize == 4 && compNum == 2)
@@ -651,12 +750,12 @@ namespace osgVerse
                     }
                     else
                     {
-                        osg::Vec2Array* ta = new osg::Vec2Array(size);
-                        copyBufferData(&(*ta)[0], &buffer.data[offset], copySize, stride, size);
+                        osg::ref_ptr<osg::Vec2Array> ta = new osg::Vec2Array(size);
+                        copyBufferData(&(*ta)[0], &bufferData[offset], copySize, stride, size);
 #if OSG_VERSION_GREATER_THAN(3, 1, 8)
                         ta->setNormalize(attrAccessor.normalized);
 #endif
-                        geom->setTexCoordArray(texUnit, ta);
+                        if (!gsData.enabled) geom->setTexCoordArray(texUnit, ta.get());
                     }
                 }
                 else if (attrib->first.find("JOINTS_") != std::string::npos && compNum == 4)
@@ -666,25 +765,34 @@ namespace osgVerse
                     {
                         if (compSize == 1)
                         {
-                            jointList0.resize(size * compNum);
-                            copyBufferData(&jointList0[0], &buffer.data[offset], copySize, stride, size);
+                            skData.jointList0.resize(size * compNum);
+                            copyBufferData(&skData.jointList0[0], &bufferData[offset], copySize, stride, size);
                         }
                         else
                         {
-                            jointList1.resize(size * compNum);
-                            copyBufferData(&jointList1[0], &buffer.data[offset], copySize, stride, size);
+                            skData.jointList1.resize(size * compNum);
+                            copyBufferData(&skData.jointList1[0], &bufferData[offset], copySize, stride, size);
                         }
                     }
                 }
-                else if (attrib->first.find("WEIGHTS_") != std::string::npos &&
-                         compSize == 4 && compNum == 4)
+                else if (attrib->first.find("WEIGHTS_") != std::string::npos && compSize == 4 && compNum == 4)
                 {
                     int wID = atoi(attrib->first.substr(8).c_str());
                     if (wID == 0)  // FIXME: weights group > 0?
                     {
-                        weightList.resize(size * compNum);
-                        copyBufferData(&weightList[0], &buffer.data[offset], copySize, stride, size);
+                        skData.weightList.resize(size * compNum);
+                        copyBufferData(&skData.weightList[0], &bufferData[offset], copySize, stride, size);
                     }
+                }
+                else if (attrib->first.compare("_ROTATION") == 0 && compSize == 4 && compNum == 4)
+                {
+                    gsData.quat = new osg::Vec4Array(size);
+                    copyBufferData(&(*gsData.quat)[0], &bufferData[offset], copySize, stride, size);
+                }
+                else if (attrib->first.compare("_SCALE") == 0 && compSize == 4 && compNum == 3)
+                {
+                    gsData.scale = new osg::Vec3Array(size);
+                    copyBufferData(&(*gsData.scale)[0], &bufferData[offset], copySize, stride, size);
                 }
                 else if (attrib->first.compare("_BATCHID") == 0 && compSize == 2 && compNum == 1)
                 {
@@ -695,21 +803,37 @@ namespace osgVerse
                     OSG_WARN << "[LoaderGLTF] Unsupported attribute " << attrib->first << " with "
                              << compNum << "-components and dataSize=" << compSize << std::endl;
                 }
-            }
+            }  // for (std::map<std::string, int>::iterator attrib ...)
 
-            osg::Vec3Array* va = static_cast<osg::Vec3Array*>(geom->getVertexArray());
-            if (!va || (va && va->empty())) continue;
+            osg::Vec3Array* va = NULL;
+            if (gsData.enabled)
+            {
+                GaussianGeometry* gaussian = static_cast<GaussianGeometry*>(geom.get());
+                if (gsData.scale.valid() && gsData.quat.valid() && gsData.alpha.valid())
+                    gaussian->setScaleAndRotation(gsData.scale.get(), gsData.quat.get(), gsData.alpha.get());
+                for (int k = 0; k < 4; ++k)
+                {
+                    if (gsData.red[k].valid()) gaussian->setShRed(k, gsData.red[k].get());
+                    if (gsData.green[k].valid()) gaussian->setShGreen(k, gsData.green[k].get());
+                    if (gsData.blue[k].valid()) gaussian->setShBlue(k, gsData.blue[k].get());
+                }
+            }
+            else
+            {
+                va = static_cast<osg::Vec3Array*>(geom->getVertexArray());
+                if (!va || (va && va->empty())) continue;
+            }
 
             // Configure primitive index array
             osg::ref_ptr<osg::PrimitiveSet> p;
             if (primitive.indices < 0)
-                p = new osg::DrawArrays(GL_POINTS, 0, va->size());
+                p = new osg::DrawArrays(GL_POINTS, 0, va ? va->size() : 0);
             else
             {
                 tinygltf::Accessor indexAccessor = _modelDef.accessors[primitive.indices];
                 const tinygltf::BufferView& indexView = _modelDef.bufferViews[indexAccessor.bufferView];
                 if (indexView.target == 0)
-                    p = new osg::DrawArrays(GL_POINTS, 0, va->size());
+                    p = new osg::DrawArrays(GL_POINTS, 0, va ? va->size() : 0);
                 else  // ELEMENT_ARRAY_BUFFER = 34963
                 {
                     const tinygltf::Buffer& indexBuffer = _modelDef.buffers[indexView.buffer];
@@ -757,26 +881,23 @@ namespace osgVerse
             }
 
             // Apply to geode and create material
-            geom->addPrimitiveSet(p.get());
+            if (!gsData.enabled) geom->addPrimitiveSet(p.get());
+            else static_cast<GaussianGeometry*>(geom.get())->finalize();
             geode->addDrawable(geom.get());
-            if (primitive.material >= 0)
-            {
-                tinygltf::Material& material = _modelDef.materials[primitive.material];
-                createMaterial(geom->getOrCreateStateSet(), material);
-            }
 
             // Handle skinning data
-            if (sd != NULL && !weightList.empty())
+            if (sd != NULL && !skData.weightList.empty())
             {
                 typedef std::pair<osg::Transform*, float> JointWeightPair;
                 PlayerAnimation::GeometryJointData gjData;
-                for (size_t w = 0; w < weightList.size(); w += 4)
+                for (size_t w = 0; w < skData.weightList.size(); w += 4)
                 {
                     PlayerAnimation::GeometryJointData::JointWeights jwMap;
                     osg::Transform* tList[4] = { NULL };
                     for (int k = 0; k < 4; ++k)
                     {
-                        int jID = jointList0.empty() ? (int)jointList1[w + k] : (int)jointList0[w + k];
+                        int jID = skData.jointList0.empty() ? (int)skData.jointList1[w + k]
+                                                            : (int)skData.jointList0[w + k];
                         if (jID < 0 || jID >= sd->joints.size())
                         {
                             OSG_WARN << "[LoaderGLTF] Invalid joint index " << jID
@@ -786,7 +907,7 @@ namespace osgVerse
 
                         osg::Node* n = _nodeCreationMap[sd->joints[jID]];
                         if (n && n->asGroup()) tList[k] = n->asGroup()->asTransform();
-                        if (tList[k]) jwMap.push_back(JointWeightPair(tList[k], weightList[w + k]));
+                        if (tList[k]) jwMap.push_back(JointWeightPair(tList[k], skData.weightList[w + k]));
                         else OSG_WARN << "[LoaderGLTF] No joint with ID = " << sd->joints[jID]
                                       << " for weight index " << (w + k) << std::endl;
                     }
@@ -801,7 +922,7 @@ namespace osgVerse
             // Handle blendshapes
             for (size_t j = 0; j < primitive.targets.size(); ++j)
                 createBlendshapeData(geom.get(), primitive.targets[j]);
-        }
+        }  // for (size_t i = 0; i < mesh.primitives.size(); ++i)
 
         bool withNames = mesh.extras.Has("targetNames");
         if (!mesh.weights.empty()) applyBlendshapeWeights(geode, mesh.weights,
@@ -1225,6 +1346,33 @@ namespace osgVerse
                 geode->getDrawable(i)->getUpdateCallback());
             if (bsa) bsa->apply(names, weights);
         }
+    }
+
+    osg::ref_ptr<osg::Geometry> LoaderGLTF::createFromExtGaussianSplattingSPZ2(const std::string& name, int bufferViewID)
+    {
+        std::vector<unsigned char> bufferData;
+        const tinygltf::BufferView& extView = _modelDef.bufferViews[bufferViewID];
+        if (extView.buffer >= 0) { bufferData = _modelDef.buffers[extView.buffer].data; }
+
+        osgDB::ReaderWriter* rw = osgDB::Registry::instance()->getReaderWriterForExtension("verse_3dgs");
+        if (!rw)
+            { OSG_WARN << "[LoaderGLTF] 3DGS plugin not found. Cannot parse SPZ in " << name << std::endl; }
+        else
+        {
+            std::stringstream ss(std::ios::in | std::ios::out | std::ios::binary);
+            ss.write((char*)bufferData.data(), bufferData.size());
+
+            osg::ref_ptr<osgDB::Options> opt = new osgDB::Options("extension=spz");
+            osg::ref_ptr<osg::Node> spzNode = rw->readNode(ss, opt.get()).getNode();
+            FindGeometryVisitor fgv(true); if (spzNode.valid()) spzNode->accept(fgv);
+
+            std::vector<std::pair<osg::Geometry*, osg::Matrix>>& geomList = fgv.getGeometries();
+            if (geomList.empty())
+                { OSG_WARN << "[LoaderGLTF] Failed to load SPZ gaussian geometry in " << name << std::endl; }
+            else
+                return geomList.front().first;  // SPZ always creates only 1 geometry
+        }
+        return NULL;
     }
 
     osg::ref_ptr<osg::Group> loadGltf(const std::string& file, bool isBinary, int usingPBR, bool yUp)
